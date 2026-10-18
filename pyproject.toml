@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "whycode"
+version = "0.1.0"
+description = "Why The Code Is Like This — ask a repo why it is the way it is"
+requires-python = ">=3.10"
+dependencies = ["neo4j>=5.0", "requests>=2.31"]
+
+[project.scripts]
+whycode = "whycode.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["whycode*"]
