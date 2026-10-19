@@ -62,6 +62,31 @@ class Answer:
     suggestions: list = field(default_factory=list)
     entity: dict | None = None
     verbalizer: str = "template"
+    decision_status: dict = field(default_factory=dict)  # decision id -> active|superseded|contested
+
+    def to_dict(self) -> dict:
+        """Machine-readable form: categorical confidence is the primary
+        signal, the numeric score rides along for audit."""
+        return {
+            "question": self.question,
+            "status": self.status,
+            "confidence": _band(self.confidence),
+            "confidence_score": self.confidence,
+            "confidence_breakdown": self.confidence_breakdown,
+            "summary": self.summary,
+            "evidence": [
+                {"tag": e["tag"], "text": e["text"],
+                 "ref": e["ref"], "date": e.get("date", "")}
+                for e in self.evidence_chain
+            ],
+            "supersession": self.supersession,
+            "decision_status": self.decision_status,
+            "person_to_ask": self.person_to_ask,
+            "observations": self.observations,
+            "suggestions": self.suggestions,
+            "traversal": self.traversal,
+            "verbalizer": self.verbalizer,
+        }
 
 
 EVIDENCE_CYPHER = """
@@ -119,14 +144,28 @@ def _assemble(rows):
     return entity_node, decisions
 
 
+def _pr_number(pid: str) -> str:
+    # "encode:httpx:pr:123" -> "123" (also tolerates the old "repo#123")
+    return pid.split(":pr:")[-1] if ":pr:" in pid else pid.split("#")[-1]
+
+
+def _issue_number(iid: str) -> str:
+    return (iid.split(":issue:")[-1] if ":issue:" in iid
+            else iid.split("#")[-1])
+
+
 def _github_url(kind: str, repo: str, ref: str) -> str:
     base = f"https://github.com/{repo}"
     if kind == "commit":
         return f"{base}/commit/{ref}"
     if kind == "pr":
-        return f"{base}/pull/{ref.split('#')[-1]}"
+        # ref looks like "encode:httpx:pr:123"
+        number = ref.split(":pr:")[-1] if ":pr:" in ref else ref.split("#")[-1]
+        return f"{base}/pull/{number}"
     if kind == "issue":
-        return f"{base}/issues/{ref.split('#')[-1]}"
+        number = (ref.split(":issue:")[-1] if ":issue:" in ref
+                  else ref.split("#")[-1])
+        return f"{base}/issues/{number}"
     return base
 
 
@@ -232,14 +271,14 @@ def answer_question(question, driver, rawctx, settings) -> Answer:
     for pid, pr in primary["prs"].items():
         chain.append({
             "tag": "EVIDENCE",
-            "text": f"Discussed in PR #{pid.split('#')[-1]}: {pr.get('title','')}",
+            "text": f"Discussed in PR #{_pr_number(pid)}: {pr.get('title','')}",
             "ref": _github_url("pr", repo, pid),
             "date": pr.get("merged_at", ""),
         })
     for iid, iss in primary["issues"].items():
         chain.append({
             "tag": "EVIDENCE",
-            "text": f"Linked issue #{iid.split('#')[-1]}: {iss.get('title','')}",
+            "text": f"Linked issue #{_issue_number(iid)}: {iss.get('title','')}",
             "ref": _github_url("issue", repo, iid),
             "date": iss.get("closed_at", ""),
         })
@@ -304,6 +343,17 @@ def answer_question(question, driver, rawctx, settings) -> Answer:
         for e in sup_edges
     ]
     ans.traversal["decision_ids"] = list(decisions.keys())
+    # Decision status: superseded (explicitly replaced), contested (a later
+    # decision probably replaced it, heuristic), or active.
+    status_of = {}
+    for e in sup_edges:
+        if e["method"] == "explicit":
+            status_of[e["older"]] = "superseded"
+        else:
+            status_of.setdefault(e["older"], "contested")
+    ans.decision_status = {
+        did: status_of.get(did, "active") for did in decisions
+    }
 
     if score < settings.confidence_threshold:
         ans.status = "refused"
@@ -319,9 +369,13 @@ def answer_question(question, driver, rawctx, settings) -> Answer:
     if sup_edges:
         sup_note = (f" Note: {len(sup_edges)} earlier decision(s) on this "
                     "code were superseded (see below).")
+    primary_status = ans.decision_status.get(
+        d["id"], "active") if primary else "active"
+    status_note = ("" if primary_status == "active"
+                   else f" Status: {primary_status}.")
     ans.summary = (f"{d.get('summary')} "
                    f"[decision: {d.get('kind')}, {d.get('date','')[:10]}]."
-                   f"{sup_note}")
+                   f"{status_note}{sup_note}")
     return ans
 
 

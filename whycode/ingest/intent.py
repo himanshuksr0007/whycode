@@ -13,6 +13,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from ..evidence_ids import (commit_id, decision_id_for_commit,
+                            decision_id_for_pr, issue_id, observation_id,
+                            pr_id)
+
 RATIONALE_PATTERNS = [
     r"\bbecause\b",
     r"\bwhy\b",
@@ -72,7 +76,7 @@ def _is_doc_path(path: str) -> bool:
     )
 
 
-def classify_commit(rec) -> Decision | None:
+def classify_commit(rec, rk: str) -> Decision | None:
     """Return a Decision, or None if the commit doesn't record one.
 
     None is the gate doing its job: the commit still lands in the graph,
@@ -81,11 +85,11 @@ def classify_commit(rec) -> Decision | None:
     text = f"{rec.subject}\n{rec.body}"
     files = [f.path for f in rec.files]
     symbols = [f"{s.file}::{s.name}" for s in rec.symbols]
-    evidence = [f"commit:{rec.sha}"]
+    evidence = [commit_id(rk, rec.sha)]
 
     if rec.is_revert:
         return Decision(
-            id=f"d:{rec.sha}",
+            id=decision_id_for_commit(rk, rec.sha),
             kind="revert",
             summary=rec.subject,
             date=rec.date,
@@ -98,11 +102,11 @@ def classify_commit(rec) -> Decision | None:
         )
     if rec.fixes_issues:
         return Decision(
-            id=f"d:{rec.sha}",
+            id=decision_id_for_commit(rk, rec.sha),
             kind="fix",
             summary=rec.subject,
             date=rec.date,
-            evidence=evidence,
+            evidence=evidence + [issue_id(rk, rec.fixes_issues[0])],
             confidence=0.7,
             commit_sha=rec.sha,
             about_files=files,
@@ -111,7 +115,7 @@ def classify_commit(rec) -> Decision | None:
         )
     if any(_is_doc_path(p) for p in files):
         return Decision(
-            id=f"d:{rec.sha}",
+            id=decision_id_for_commit(rk, rec.sha),
             kind="doc",
             summary=rec.subject,
             date=rec.date,
@@ -123,7 +127,7 @@ def classify_commit(rec) -> Decision | None:
         )
     if _has_rationale(text):
         return Decision(
-            id=f"d:{rec.sha}",
+            id=decision_id_for_commit(rk, rec.sha),
             kind="rationale",
             summary=rec.subject,
             date=rec.date,
@@ -136,18 +140,18 @@ def classify_commit(rec) -> Decision | None:
     return None
 
 
-def classify_pr(pr) -> Decision | None:
+def classify_pr(pr, rk: str) -> Decision | None:
     """A merged PR with a rationale-bearing body counts as a decision."""
     if not pr.merged_at:
         return None
     text = f"{pr.title}\n{pr.body}"
     if not _has_rationale(text) and len(pr.comments) < 2:
         return None
-    evidence = [f"pr:{pr.number}"]
+    evidence = [pr_id(rk, pr.number)]
     if pr.merge_commit_sha:
-        evidence.append(f"commit:{pr.merge_commit_sha}")
+        evidence.append(commit_id(rk, pr.merge_commit_sha))
     return Decision(
-        id=f"d:pr-{pr.number}",
+        id=decision_id_for_pr(rk, pr.number),
         kind="pr_rationale",
         summary=pr.title,
         date=pr.merged_at,
@@ -157,14 +161,15 @@ def classify_pr(pr) -> Decision | None:
     )
 
 
-def derive_observations(file_stats: dict[str, dict]) -> list[Observation]:
+def derive_observations(file_stats: dict[str, dict],
+                        rk: str) -> list[Observation]:
     """Aggregate observations. file_stats: path -> {commits, decisions}."""
     observations = []
     for path, st in file_stats.items():
         if st["commits"] >= 8 and st["decisions"] == 0:
             observations.append(
                 Observation(
-                    id=f"o:hotspot:{path}",
+                    id=observation_id(rk, path),
                     kind="unexplained_hotspot",
                     summary=(
                         f"{path} changed in {st['commits']} commits with no "
@@ -183,7 +188,8 @@ def token_set(text: str) -> set:
 
 
 def supersession_edges(decisions: list[Decision],
-                       order: dict | None = None) -> list[dict]:
+                       order: dict | None = None,
+                       rk: str = "") -> list[dict]:
     """Supersession edges between decisions.
 
     - explicit: a revert names its target (confidence 1.0)
@@ -200,7 +206,7 @@ def supersession_edges(decisions: list[Decision],
 
     for d in decisions:
         if d.supersedes_sha:
-            target = by_id.get(f"d:{d.supersedes_sha}")
+            target = by_id.get(decision_id_for_commit(rk, d.supersedes_sha))
             if target:
                 edges.append(
                     {

@@ -5,6 +5,7 @@ Decision with an empty evidence list and you get an EvidenceGateError.
 """
 from __future__ import annotations
 
+from ..evidence_ids import issue_id, pr_id, review_comment_id
 from .schema import init_schema
 
 BATCH = 400
@@ -103,10 +104,10 @@ class GraphBuilder:
                 rows=rows[i:i + BATCH],
             )
 
-    def write_github(self, prs, issues, repo: str) -> None:
+    def write_github(self, prs, issues, rk: str) -> None:
         pr_rows = [
             {
-                "id": f"{repo}#{p.number}",
+                "id": pr_id(rk, p.number),
                 "number": p.number,
                 "title": p.title,
                 "merged_at": p.merged_at,
@@ -149,7 +150,7 @@ class GraphBuilder:
         )
         issue_rows = [
             {
-                "id": f"{repo}#{i.number}",
+                "id": issue_id(rk, i.number),
                 "number": i.number,
                 "title": i.title,
                 "closed_at": i.closed_at,
@@ -177,6 +178,41 @@ class GraphBuilder:
                 MERGE (cp)-[:COMMENTED_ON]->(i)
                 """,
                 rows=issue_rows[i:i + BATCH],
+            )
+
+    def write_review_comments(self, prs, rk: str) -> None:
+        """PR review comments anchored to file/line/side."""
+        rows = []
+        for p in prs:
+            pid = pr_id(rk, p.number)
+            for rc in p.review_comments:
+                rows.append({
+                    "id": review_comment_id(rk, rc.id),
+                    "pr_id": pid,
+                    "path": rc.path,
+                    "line": rc.line,
+                    "side": rc.side,
+                    "url": rc.url,
+                    "user": rc.user,
+                    "created_at": rc.created_at,
+                })
+        for i in range(0, len(rows), BATCH):
+            self._run(
+                """
+                UNWIND $rows AS r
+                MERGE (rc:ReviewComment:Structural {id: r.id})
+                SET rc.path = r.path, rc.line = r.line, rc.side = r.side,
+                    rc.url = r.url, rc.created_at = r.created_at
+                MERGE (p:Person:Structural {login: r.user})
+                MERGE (p)-[:AUTHORED]->(rc)
+                WITH rc, r
+                MATCH (pr:PullRequest:Structural {id: r.pr_id})
+                MERGE (pr)-[:HAS_COMMENT]->(rc)
+                WITH rc, r
+                MATCH (f:File:Structural {path: r.path})
+                MERGE (rc)-[:COMMENTS_ON]->(f)
+                """,
+                rows=rows[i:i + BATCH],
             )
 
     def link_fixes(self, decisions) -> None:
@@ -216,6 +252,12 @@ class GraphBuilder:
                 raise EvidenceGateError(
                     f"refusing to write Decision {d.id} without evidence"
                 )
+
+        def evidence_kind(eid: str) -> str | None:
+            # "encode:httpx:pr:123" -> "pr" (repo key itself has a colon)
+            parts = eid.split(":")
+            return parts[2] if len(parts) > 3 else None
+
         rows = [
             {
                 "id": d.id,
@@ -228,8 +270,9 @@ class GraphBuilder:
                 "about_files": d.about_files,
                 "about_symbols": d.about_symbols,
                 "based_on": [
-                    e for e in d.evidence
-                    if e.startswith("pr:") or e.startswith("issue:")
+                    {"kind": evidence_kind(e), "id": e}
+                    for e in d.evidence
+                    if evidence_kind(e) in ("pr", "issue")
                 ],
             }
             for d in decisions
@@ -267,6 +310,27 @@ class GraphBuilder:
                 UNWIND r.about_symbols AS sk
                 MATCH (s:Symbol:Structural {key: sk})
                 MERGE (d)-[:ABOUT]->(s)
+                """,
+                rows=rows[i:i + BATCH],
+            )
+        for i in range(0, len(rows), BATCH):
+            self._run(
+                """
+                UNWIND $rows AS r
+                MATCH (d:Decision:Intent {id: r.id})
+                UNWIND r.based_on AS b
+                CALL {
+                  WITH d, b
+                  WITH d, b WHERE b.kind = 'pr'
+                  MATCH (pr:PullRequest:Structural {id: b.id})
+                  MERGE (d)-[:BASED_ON]->(pr)
+                }
+                CALL {
+                  WITH d, b
+                  WITH d, b WHERE b.kind = 'issue'
+                  MATCH (iss:Issue:Structural {id: b.id})
+                  MERGE (d)-[:BASED_ON]->(iss)
+                }
                 """,
                 rows=rows[i:i + BATCH],
             )
@@ -311,7 +375,8 @@ class GraphBuilder:
         out = {}
         with self.driver.session(database=self.database) as session:
             for label in ("Commit", "File", "Symbol", "Person", "PullRequest",
-                          "Issue", "Decision", "Observation", "DocFile"):
+                          "Issue", "ReviewComment", "Decision",
+                          "Observation", "DocFile"):
                 rec = session.run(
                     f"MATCH (n:{label}) RETURN count(n) AS c"
                 ).single()

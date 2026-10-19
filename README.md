@@ -7,7 +7,7 @@ honest "I don't know" when the history doesn't say.
 ## The one flow
 
 ```bash
-whycode ask "why does flask use blinker for signals?"
+whycode ask "why are retries disabled by default in httpx?"
 ```
 
 You get back the decision, the evidence chain with dates and links, anything
@@ -32,7 +32,7 @@ cp .env.example .env        # fill in GITHUB_TOKEN, NEO4J_PASSWORD, ...
 export $(cat .env | xargs)  # or use direnv / your preferred loader
 ```
 
-**3. Ingest a repository** (default demo: `pallets/flask`):
+**3. Ingest a repository** (default demo: `encode/httpx`):
 
 ```bash
 whycode ingest
@@ -75,6 +75,14 @@ always marked as a guess), score confidence, refuse under the threshold.
 The traversal is returned with the answer so you can check the score.
 `docs/ARCHITECTURE.md` has the full spec.
 
+Ingestion is idempotent and resumable: completed PRs/issues are tracked in
+SQLite, raw GitHub payloads are kept for replay, and a rerun skips what's
+done (or use `--force` to redo). Every run writes an ingestion report and a
+JSONL dump of the normalized evidence under the data dir. `whycode ask
+--json` gives you the answer as JSON, with categorical confidence
+(`high`/`medium`/`low`) as the primary signal and the numeric score kept
+for audit.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -82,7 +90,7 @@ The traversal is returned with the answer so you can check the score.
 | `NEO4J_URI` | `bolt://localhost:7687` | Neo4j / AuraDB (`neo4j+s://…`) |
 | `NEO4J_USER` / `NEO4J_PASSWORD` | `neo4j` / `password` | auth |
 | `GITHUB_TOKEN` | — | raises API limit 60 → 5000/hr |
-| `GITHUB_REPO` | `pallets/flask` | `owner/name` to ingest |
+| `GITHUB_REPO` | `encode/httpx` | `owner/name` to ingest |
 | `WHYCODE_MAX_COMMITS` | `1200` | commit cap |
 | `WHYCODE_MAX_PRS` / `WHYCODE_MAX_ISSUES` | `150` | API caps |
 | `WHYCODE_CONFIDENCE_THRESHOLD` | `0.45` | refusal threshold |
@@ -90,8 +98,9 @@ The traversal is returned with the answer so you can check the score.
 
 ## Honest limitations
 
-- Symbol extraction (functions/classes/config keys) is **regex-based**, not
-  a parser. Fine for the demo, wrong on exotic syntax.
+- Symbol extraction uses **tree-sitter** for Python (with a regex fallback
+  for other languages and when tree-sitter isn't installed). Still
+  approximate — it's for linking, not a compiler.
 - Rationale detection is keywords + conventions (`because`, `fixes #n`,
   `Revert`, design docs). Silent decisions stay `Observation`s on purpose.
 - Heuristic supersession (word overlap ≥ 0.4) can misfire; it's always
@@ -110,10 +119,12 @@ Graph integration is exercised through `whycode demo` against a live Neo4j.
 ## Layout
 
 ```
-whycode/ingest/     git history, GitHub API, intent classification + gate
+whycode/ingest/     git history, GitHub API, intent classification + gate,
+                    tree-sitter symbols, relevance scoring, ingest state
 whycode/graph/      Neo4j schema (3 layers) + batched builder
 whycode/store/      raw-context SQLite FTS index
 whycode/retrieval/  entity linking + answering (evidence, supersession,
                     confidence, refusal)
+whycode/evidence_ids.py  stable content-addressed IDs (repo:type:key)
 docs/ARCHITECTURE.md  reusable spec of the above
 ```

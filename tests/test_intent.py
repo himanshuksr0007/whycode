@@ -1,4 +1,6 @@
 """Unit tests for the intent layer, incl. the anti-hallucination gate."""
+
+RK = "test:repo"
 import unittest
 from types import SimpleNamespace
 
@@ -25,7 +27,7 @@ class TestGate(unittest.TestCase):
     def test_plain_commit_yields_no_decision(self):
         # THE gate: a commit with no rationale signals must not become a Decision.
         r = rec(subject="fix typo", body="oops")
-        self.assertIsNone(classify_commit(r))
+        self.assertIsNone(classify_commit(r, RK))
 
     def test_every_decision_has_evidence(self):
         cases = [
@@ -35,14 +37,14 @@ class TestGate(unittest.TestCase):
             rec(subject="choose X because Y is slow", body="rationale here"),
         ]
         for r in cases:
-            d = classify_commit(r)
+            d = classify_commit(r, RK)
             self.assertIsNotNone(d)
             self.assertTrue(d.evidence, f"{d.kind} has no evidence")
 
     def test_revert_kind_and_target(self):
         r = rec(subject='Revert "old thing"', is_revert=True,
                 revert_of_sha="b" * 40)
-        d = classify_commit(r)
+        d = classify_commit(r, RK)
         self.assertEqual(d.kind, "revert")
         self.assertEqual(d.supersedes_sha, "b" * 40)
 
@@ -50,7 +52,7 @@ class TestGate(unittest.TestCase):
         f = SimpleNamespace(path="docs/adr/0001-x.md", added=10,
                             removed=0, status="A")
         r = rec(subject="document the retry policy", files=[f])
-        d = classify_commit(r)
+        d = classify_commit(r, RK)
         self.assertIsNotNone(d)
         self.assertEqual(d.kind, "doc")
 
@@ -59,7 +61,7 @@ class TestObservations(unittest.TestCase):
     def test_hotspot_without_rationale(self):
         stats = {"a.py": {"commits": 12, "decisions": 0},
                  "b.py": {"commits": 12, "decisions": 3}}
-        obs = derive_observations(stats)
+        obs = derive_observations(stats, RK)
         self.assertEqual(len(obs), 1)
         self.assertEqual(obs[0].about_files, ["a.py"])
         self.assertEqual(obs[0].kind, "unexplained_hotspot")
@@ -72,12 +74,14 @@ class TestSupersession(unittest.TestCase):
                         about_files=list(files))
 
     def test_explicit_revert_edge(self):
-        old = self._d("d:1", "use threads", "2023-01-01")
-        new = self._d("d:2", 'Revert "use threads"', "2024-01-01")
+        old = self._d("test:repo:decision:1", "use threads", "2023-01-01")
+        new = self._d("test:repo:decision:2", 'Revert "use threads"',
+                      "2024-01-01")
         new.supersedes_sha = "1"
-        edges = supersession_edges([old, new])
+        edges = supersession_edges([old, new], rk=RK)
         self.assertTrue(
-            any(e["newer"] == "d:2" and e["older"] == "d:1"
+            any(e["newer"] == "test:repo:decision:2"
+                and e["older"] == "test:repo:decision:1"
                 and e["method"] == "explicit" for e in edges))
 
     def test_heuristic_edge_on_overlap(self):

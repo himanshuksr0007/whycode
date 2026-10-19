@@ -27,7 +27,7 @@ class Settings:
     neo4j_database: str = "neo4j"
 
     github_token: str | None = None
-    github_repo: str = "pallets/flask"  # owner/name, the demo target
+    github_repo: str = "encode/httpx"  # owner/name, the demo target
 
     max_commits: int = 1200
     max_prs: int = 150
@@ -54,7 +54,7 @@ class Settings:
             neo4j_password=os.environ.get("NEO4J_PASSWORD", "password"),
             neo4j_database=os.environ.get("NEO4J_DATABASE", "neo4j"),
             github_token=os.environ.get("GITHUB_TOKEN"),
-            github_repo=os.environ.get("GITHUB_REPO", "pallets/flask"),
+            github_repo=os.environ.get("GITHUB_REPO", "encode/httpx"),
             max_commits=_int("WHYCODE_MAX_COMMITS", 1200),
             max_prs=_int("WHYCODE_MAX_PRS", 150),
             max_issues=_int("WHYCODE_MAX_ISSUES", 150),
@@ -91,4 +91,25 @@ class Settings:
         return os.path.join(
             self.data_dir, "rawctx",
             self.github_repo.replace("/", "__") + ".sqlite",
+        )
+
+    @property
+    def state_path(self) -> str:
+        return os.path.join(
+            self.data_dir, "ingest",
+            self.github_repo.replace("/", "__") + ".sqlite",
+        )
+
+    @property
+    def report_path(self) -> str:
+        return os.path.join(
+            self.data_dir, "artifacts",
+            self.github_repo.replace("/", "__") + "-ingestion-report.json",
+        )
+
+    @property
+    def jsonl_path(self) -> str:
+        return os.path.join(
+            self.data_dir, "artifacts",
+            self.github_repo.replace("/", "__") + "-normalized.jsonl",
         )

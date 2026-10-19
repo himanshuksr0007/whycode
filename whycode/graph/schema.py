@@ -1,7 +1,7 @@
 """Graph schema, organized in three layers.
 
 Layer 1 — structure. Boring facts pulled straight out of the repo:
-    Commit, File, Symbol, Person, PullRequest, Issue, DocFile
+    Commit, File, Symbol, Person, PullRequest, Issue, ReviewComment, DocFile
 
 Layer 2 — intent. What the history seems to mean. A Decision only exists
 if something backs it (commit, PR thread, issue, doc) — the builder
@@ -18,7 +18,10 @@ Relationships:
     (Symbol)-[:DEFINED_IN]->(File)
     (PullRequest)-[:MERGED_AS]->(Commit)
     (PullRequest)-[:FIXES]->(Issue)
+    (PullRequest)-[:HAS_COMMENT]->(ReviewComment)
+    (ReviewComment)-[:COMMENTS_ON]->(File)
     (Person)-[:COMMENTED_ON]->(PullRequest | Issue)
+    (Person)-[:AUTHORED]->(ReviewComment)
     (DocFile)-[:MENTIONS]->(File)
     (Decision)-[:RECORDED_IN]->(Commit)
     (Decision)-[:ABOUT]->(File | Symbol)
@@ -34,6 +37,7 @@ CONSTRAINTS = [
     "CREATE CONSTRAINT IF NOT EXISTS FOR (p:Person) REQUIRE p.login IS UNIQUE",
     "CREATE CONSTRAINT IF NOT EXISTS FOR (pr:PullRequest) REQUIRE pr.id IS UNIQUE",
     "CREATE CONSTRAINT IF NOT EXISTS FOR (i:Issue) REQUIRE i.id IS UNIQUE",
+    "CREATE CONSTRAINT IF NOT EXISTS FOR (rc:ReviewComment) REQUIRE rc.id IS UNIQUE",
     "CREATE CONSTRAINT IF NOT EXISTS FOR (d:Decision) REQUIRE d.id IS UNIQUE",
     "CREATE CONSTRAINT IF NOT EXISTS FOR (o:Observation) REQUIRE o.id IS UNIQUE",
     "CREATE CONSTRAINT IF NOT EXISTS FOR (d:DocFile) REQUIRE d.path IS UNIQUE",

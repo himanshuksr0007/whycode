@@ -15,6 +15,19 @@ API = "https://api.github.com"
 
 
 @dataclass
+class ReviewCommentRecord:
+    id: int
+    path: str
+    line: int | None
+    side: str | None
+    diff_hunk: str
+    user: str
+    created_at: str
+    body: str
+    url: str
+
+
+@dataclass
 class PullRequestRecord:
     number: int
     title: str
@@ -25,6 +38,8 @@ class PullRequestRecord:
     merge_commit_sha: str | None
     url: str
     comments: list = field(default_factory=list)  # [{user, created_at, body}]
+    review_comments: list = field(default_factory=list)  # ReviewCommentRecord
+    raw: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -37,6 +52,7 @@ class IssueRecord:
     closed_at: str | None
     url: str
     comments: list = field(default_factory=list)
+    raw: dict = field(default_factory=dict)
 
 
 class GitHubClient:
@@ -77,7 +93,34 @@ class GitHubClient:
             for c in data[:limit]
         ]
 
-    def iter_prs(self, owner: str, repo: str, max_prs: int):
+    def iter_review_comments(self, owner: str, repo: str, pr_number: int,
+                               limit: int = 30) -> list[ReviewCommentRecord]:
+        """PR review comments — the ones anchored to a file/line/side."""
+        try:
+            data = self._get(
+                f"{API}/repos/{owner}/{repo}/pulls/{pr_number}/comments",
+                {"per_page": limit},
+            )
+        except requests.HTTPError:
+            return []
+        out = []
+        for c in data[:limit]:
+            out.append(ReviewCommentRecord(
+                id=c["id"],
+                path=c.get("path", ""),
+                line=c.get("line"),
+                side=c.get("side"),
+                diff_hunk=(c.get("diff_hunk") or "")[:2000],
+                user=c.get("user", {}).get("login", "?"),
+                created_at=c.get("created_at", ""),
+                body=(c.get("body") or "")[:3000],
+                url=c.get("html_url", ""),
+            ))
+        return out
+
+    def iter_prs(self, owner: str, repo: str, max_prs: int,
+                 review_comments: bool = True,
+                 skip_numbers: set = ()):
         page, seen = 1, 0
         while seen < max_prs:
             batch = self._get(
@@ -93,6 +136,8 @@ class GitHubClient:
             if not batch:
                 break
             for pr in batch:
+                if pr["number"] in skip_numbers:
+                    continue  # already ingested; skip the detail calls
                 if seen >= max_prs:
                     return
                 seen += 1
@@ -106,10 +151,15 @@ class GitHubClient:
                     merge_commit_sha=pr.get("merge_commit_sha"),
                     url=pr.get("html_url", ""),
                     comments=self._comments(owner, repo, pr["number"]),
+                    review_comments=self.iter_review_comments(
+                        owner, repo, pr["number"])
+                    if review_comments else [],
+                    raw=pr,
                 )
             page += 1
 
-    def iter_issues(self, owner: str, repo: str, max_issues: int):
+    def iter_issues(self, owner: str, repo: str, max_issues: int,
+                    skip_numbers: set = ()):
         page, seen = 1, 0
         while seen < max_issues:
             batch = self._get(
@@ -127,6 +177,8 @@ class GitHubClient:
             for issue in batch:
                 if "pull_request" in issue:  # PRs also appear here; skip them
                     continue
+                if issue["number"] in skip_numbers:
+                    continue
                 if seen >= max_issues:
                     return
                 seen += 1
@@ -139,5 +191,6 @@ class GitHubClient:
                     closed_at=issue.get("closed_at"),
                     url=issue.get("html_url", ""),
                     comments=self._comments(owner, repo, issue["number"]),
+                    raw=issue,
                 )
             page += 1

@@ -221,44 +221,123 @@ def _attach_symbols(
     path: str | None = None
     added: dict[str, set] = {}
     removed: dict[str, set] = {}
+    # per-commit, per-file: {"added": set, "removed": set,
+    #                        "hunks": [(new_start, new_end)]}
+    per_commit: dict[str, dict] = {}
+    HUNK_RE = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 
-    def flush():
-        # Flush ALL files seen for this commit (called at commit boundaries).
+    def cur():
+        return per_commit.setdefault(sha, {}).setdefault(
+            path, {"added": set(), "removed": set(), "hunks": []})
+
+    def flush_commit():
+        # regex pass for every file; tree-sitter refines .py files after
         if sha and sha in commits:
             rec = commits[sha]
-            for p in added:
-                a, r = added[p], removed.get(p, set())
+            for p, info in per_commit.get(sha, {}).items():
+                a, r = info["added"], info["removed"]
                 for name, kind in a - r:
                     rec.symbols.append(
-                        SymbolChange(name, kind, p, "introduced")
-                    )
+                        SymbolChange(name, kind, p, "introduced"))
                 for name, kind in r - a:
                     rec.symbols.append(
-                        SymbolChange(name, kind, p, "removed")
-                    )
+                        SymbolChange(name, kind, p, "removed"))
                 for name, kind in a & r:
                     rec.symbols.append(
-                        SymbolChange(name, kind, p, "modified")
-                    )
+                        SymbolChange(name, kind, p, "modified"))
 
     for line in out.split("\n"):
         if line.startswith("@@@") and line.endswith("@@@") and len(line) == 46:
-            flush()
+            flush_commit()
             sha, path = line[3:-3], None
-            added, removed = {}, {}
         elif line.startswith("+++ b/"):
             path = line[6:]
-            added.setdefault(path, set())
-            removed.setdefault(path, set())
+            cur()
+        elif line.startswith("@@ ") and path and sha:
+            m = HUNK_RE.match(line)
+            if m:
+                start = int(m.group(1))
+                count = int(m.group(2)) if m.group(2) else 1
+                if count:
+                    cur()["hunks"].append((start, start + count - 1))
         elif path and sha and line.startswith("+") and not line.startswith("+++"):
             ext = os.path.splitext(path)[1].lower()
             for name, kind in _symbols_in_line(line[1:], ext):
-                added[path].add((name, kind))
+                cur()["added"].add((name, kind))
         elif path and sha and line.startswith("-") and not line.startswith("---"):
             ext = os.path.splitext(path)[1].lower()
             for name, kind in _symbols_in_line(line[1:], ext):
-                removed[path].add((name, kind))
-    flush()
+                cur()["removed"].add((name, kind))
+    flush_commit()
+    _refine_py_symbols(repo_path, commits, per_commit)
+
+
+def _blob_id(repo_path: str, rev: str, path: str) -> str | None:
+    try:
+        return _git(repo_path, "rev-parse", f"{rev}:{path}").strip()
+    except RuntimeError:
+        return None
+
+
+def _refine_py_symbols(repo_path: str,
+                       commits: dict[str, CommitRecord],
+                       per_commit: dict) -> None:
+    """Replace regex-derived symbols for .py files with tree-sitter results.
+
+    Parses the new and parent versions of each changed .py file (cached by
+    blob sha, so identical content is parsed once), then classifies by set
+    difference; "modified" needs a diff hunk overlapping the symbol's lines.
+    If tree-sitter isn't installed, the regex results stand untouched.
+    """
+    from . import treesitter_extract as tse
+
+    cache: dict[str, list | None] = {}
+
+    def syms(rev: str | None, path: str):
+        if not rev:
+            return []
+        blob = _blob_id(repo_path, rev, path)
+        if not blob:
+            return []
+        if blob not in cache:
+            try:
+                text = _git(repo_path, "show", f"{rev}:{path}")
+            except RuntimeError:
+                return []
+            cache[blob] = tse.extract(path, text)
+        return cache[blob]
+
+    for sha, files in per_commit.items():
+        rec = commits.get(sha)
+        if not rec:
+            continue
+        parent = rec.parents[0] if rec.parents else None
+        for path, info in files.items():
+            if not path.endswith(".py"):
+                continue
+            new_syms = syms(sha, path)
+            if new_syms is None:
+                continue  # tree-sitter unavailable; keep regex results
+            old_syms = syms(parent, path) or []
+            new_names = {(n, k) for n, k, _, _ in new_syms}
+            old_names = {(n, k) for n, k, _, _ in old_syms}
+            ranges = {(n, k): (s, e) for n, k, s, e in new_syms}
+            hunks = info["hunks"]
+
+            def overlaps(s: int, e: int) -> bool:
+                return any(not (e < hs or s > he) for hs, he in hunks)
+
+            refined = []
+            for n, k in new_names - old_names:
+                refined.append(SymbolChange(n, k, path, "introduced"))
+            for n, k in old_names - new_names:
+                refined.append(SymbolChange(n, k, path, "removed"))
+            for n, k in new_names & old_names:
+                s, e = ranges[(n, k)]
+                if overlaps(s, e):
+                    refined.append(SymbolChange(n, k, path, "modified"))
+            rec.symbols = ([s for s in rec.symbols if s.file != path]
+                           + refined)
 
 
 def _trailers_and_reverts(commits: dict[str, CommitRecord]) -> None:

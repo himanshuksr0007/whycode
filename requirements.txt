@@ -1,3 +1,7 @@
 # Runtime dependencies. Keep this list small on purpose.
 neo4j>=5.0
 requests>=2.31
+# Optional but recommended: precise symbol extraction (falls back to regex
+# heuristics when not installed).
+tree-sitter>=0.21
+tree-sitter-python>=0.21
